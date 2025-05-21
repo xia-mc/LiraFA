@@ -110,7 +110,8 @@ def main():
             for module in modules.values():
                 if not module.update(packet):
                     break
-            w.send(packet, recalculate_checksum=False)
+            else:
+                w.send(packet, recalculate_checksum=False)
 
 
 if __name__ == '__main__':
