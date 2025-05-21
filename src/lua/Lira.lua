@@ -15,7 +15,7 @@ end
 
 
 local NAME         = "Lira"
-local VERSION      = "v1.4"
+local VERSION      = "v1.7"
 local DICTIONARY   = "Il"
 local ID_LENGTH    = 5
 local GROUP_A      = gui.ctx:find("lua>elements a")
@@ -52,6 +52,7 @@ ffi.cdef [[
     typedef unsigned char BYTE;
     typedef char* LPSTR;
     typedef wchar_t* LPWSTR;
+    typedef void* LPVOID;
     typedef const wchar_t* LPCWSTR;
     typedef struct _SECURITY_ATTRIBUTES {
         DWORD nLength;
@@ -340,6 +341,57 @@ local function playSound(filename)
     PlaySoundA(filename, nil, SND_ASYNC + SND_FILENAME)
 end
 
+local Backend_connected = false
+local function Backend_send(msg)
+end
+local function Backend_read()
+end
+local function Backend_close()
+end
+call(function ()
+    local CreateFileA = ffi.cast("HANDLE(__stdcall*)(LPCSTR, DWORD, DWORD, LPVOID, DWORD, DWORD, HANDLE)", utils.find_export("kernel32.dll", "CreateFileA"))
+    local WriteFile = ffi.cast("BOOL(__stdcall*)(HANDLE, LPCSTR, DWORD, DWORD*, LPVOID)", utils.find_export("kernel32.dll", "WriteFile"))
+    local ReadFile = ffi.cast("BOOL(__stdcall*)(HANDLE, LPVOID, DWORD, DWORD*, LPVOID)", utils.find_export("kernel32.dll", "ReadFile"))
+    local CloseHandle = ffi.cast("BOOL(__stdcall*)(HANDLE)", utils.find_export("kernel32.dll", "CloseHandle"))
+
+    local BACKEND_PIPE = "\\\\.\\pipe\\LiraFABackend"
+    local pipe_cstr = ffi.new("const char[?]", #BACKEND_PIPE + 1, BACKEND_PIPE)
+
+    local handle = CreateFileA(
+        pipe_cstr,
+        bor(GENERIC_READ, GENERIC_WRITE),
+        0, nil, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nil
+    )
+
+    if handle == ffi.cast("HANDLE", -1) then
+        gui.notify:add(gui.notification(NAME, "Failed to connect backend, some features are unavailable."))
+        print("[Lira] Failed to connect backend, some features are unavailable.")
+        return
+    end
+
+    Backend_send = function (msg)
+        msg = msg .. "\n"
+        local c_msg = ffi.new("const char[?]", #msg, msg)
+        local written = ffi.new("DWORD[1]")
+        WriteFile(handle, c_msg, #msg, written, nil)
+    end
+
+    Backend_read = function ()
+        local buffer = ffi.new("char[4096]")
+        local read = ffi.new("DWORD[1]")
+        assert(ReadFile(handle, buffer, 4096, read, nil) ~= 0)
+
+        local response = ffi.string(buffer, read[0])
+        return response
+    end
+
+    Backend_close = function ()
+        CloseHandle(handle)
+    end
+
+    Backend_connected = true
+end)
+
 math.randomseed(game.global_vars.real_time)
 mods.events:add_listener("player_death")
 mods.events:add_listener("player_spawn")
@@ -463,6 +515,26 @@ end
 --     local qAngle = ffi.cast("QAngle", cData)
 --     return vector(qAngle.x, qAngle.y, qAngle.z)
 -- end
+local function getYawDiff(from, to)
+    from = normalizeYaw(from)
+    to = normalizeYaw(to)
+    local diff1 = to - from
+    local diff2 = from + (360 - to)
+    if math.abs(diff1) <= math.abs(diff2) then
+        return diff1
+    else
+        return diff2
+    end
+end
+local function limit(value, min, max)
+    if value < min then
+        return min
+    end
+    if value > max then
+        return max
+    end
+    return value
+end
 local function toraw(index)
     return 2 ^ (index - 1)
 end
@@ -1091,7 +1163,7 @@ events.create_move:add(function(cmd)
         z = position.z - lastPosition.z
     }
 end)
-events.present_queue:add(function ()
+events.present_queue:add(function()
     local local_player = entities.get_local_pawn()
     if local_player == nil or (not local_player:is_alive()) then
         lastPosition = { x = 0, y = 0, z = 0 }
@@ -1323,10 +1395,14 @@ local KILLMESSAGE_RISEGO = {
     "Shot at head, and missed head, but hit anyways because of spread (lol)",
     "Missed {} due to resolver",
 }
-local KILLMESSAGE_MODE = { "SilenceFix", "Rise", "Rise:GO" }
+local KILLMESSAGE_XINXIN = {
+    "内部是60元哈 你给了欣欣哥40元 请在支付我20元售后费哈 因为欣欣哥是更新参数的 我呢是来搞售后滴 只要我在线 售后会特别的好呢 请你放心 我们是绝对不会让你吃亏的呢哈学生党！"
+}
+local KILLMESSAGE_MODE = { "SilenceFix", "Rise", "Rise:GO", "XinXin", "Custom" }
 local killmessage = newCheckbox(GROUP_A, "Killmessage")
 addLabel(GROUP_B, "Killmessage")
 local killmessageMode = newComboBox(GROUP_B, "Mode", KILLMESSAGE_MODE)
+local killmessageCustomMsg = newTextInput(GROUP_B, "Custom Msg")
 local killmessageEnemyCheck = newCheckbox(GROUP_B, "Enemy Check", true)
 events.event:add(function(event)
     if event:get_name() ~= "player_death" or (not killmessage:get_value():get()) then
@@ -1346,17 +1422,22 @@ events.event:add(function(event)
 
     local msgList = {}
 
-    local mode = KILLMESSAGE_MODE[fromraw(killmessageMode:get_value():get():get_raw())]
-    if mode == "SilenceFix" then
+    if isSelected(killmessageMode, 0) then
         msgList = KILLMESSAGE_SILENCEFIX
-    elseif mode == "Rise" then
+    elseif isSelected(killmessageMode, 1) then
         msgList = KILLMESSAGE_RISE
-    elseif mode == "Rise:GO" then
+    elseif isSelected(killmessageMode, 2) then
         msgList = KILLMESSAGE_RISEGO
+    elseif isSelected(killmessageMode, 3) then
+        msgList = KILLMESSAGE_XINXIN
+    elseif isSelected(killmessageMode, 4) then
+        msgList = { killmessageCustomMsg:get_value():get() }
     end
 
-    assert(msgList ~= nil)
-    assert(#msgList > 0)
+    if #msgList == 0 then
+        return
+    end
+
     local message = string.gsub(msgList[math.random(#msgList)], "{}", victim:get_name())
     sendChat(message)
 end)
@@ -2024,7 +2105,9 @@ call(function()
                     return disablerSecureRandom:random()
                 end
             elseif isSelected(disablerRandomMode, 3) then
-                rng = gaussianRandom
+                rng = function ()
+                    return limit(gaussianRandom(), 0, 1)
+                end
             elseif isSelected(disablerRandomMode, 4) then
                 rng = function()
                     return disablerIntaveRandom:random()
@@ -2180,6 +2263,226 @@ call(function()
             end
         end
     end)
+end)
+
+
+call(function()
+    local enabled = newCheckbox(GROUP_A, "SilentAim")
+    addLabel(GROUP_B, "SilentAim")
+    local mode = newComboBox(GROUP_B, "Mode", { "Instant" })
+    local fov = newSlider(GROUP_B, "FOV", 10, 1, 180, 1)
+    local inAir = newCheckbox(GROUP_B, "In Air", false)
+    local aimBase = newComboBox(GROUP_B, "Aim Base", { "Head", "Foot" })
+    local offsetX = newSlider(GROUP_B, "Offset X", 0, -100, 100, 5)
+    local offsetY = newSlider(GROUP_B, "Offset Y", 0, -100, 100, 5)
+    local offsetZ = newSlider(GROUP_B, "Offset Z", 0, -100, 100, 5)
+    local noise = newCheckbox(GROUP_B, "Noise", false)
+    local randomMode = newComboBox(GROUP_B, "Random Mode", { "Random", "SecureRandom", "Gaussian", "Intave" })
+    local noiseScale = newSlider(GROUP_B, "Scale", 1.0, 0.1, 1.0, 0.01, "%.2f")
+    local lockView = newCheckbox(GROUP_B, "Lock View", false)
+
+    local secureRandom = SecureRandom.new()
+    local intaveRandom = ContextualRandom.new()
+
+    events.create_move:add(function(cmd)
+        if cmd == nil then
+            return
+        end
+        if not enabled:get_value():get() then
+            return
+        end
+
+        local self = entities:get_local_pawn()
+        if self == nil then
+            return
+        end
+
+        if (not inAir:get_value():get()) and isInAir() then
+            return
+        end
+
+        local selfPos = self:get_eye_pos()
+        local angles = cmd:get_viewangles()
+
+        local fovVal = fov:get_value():get()
+        local aimBaseVal
+        if isSelected(aimBase, 0) then
+            aimBaseVal = 0
+        elseif isSelected(aimBase, 1) then
+            aimBaseVal = 1
+        else
+            return
+        end
+        local offsetXVal = offsetX:get_value():get()
+        local offsetYVal = offsetY:get_value():get()
+        local offsetZVal = offsetZ:get_value():get()
+
+        local delta = fovVal
+        local target = nil
+        entities.players:for_each(function(entry)
+            local entity = entry.entity
+            if entity == nil then
+                return
+            end
+            if not entity:is_enemy() then
+                return
+            end
+            if not entity:is_alive() then
+                return
+            end
+
+            local pos
+            if aimBaseVal == 0 then
+                pos = entity:get_eye_pos()
+            else
+                pos = entity:get_abs_origin()
+            end
+            pos = {
+                x = pos.x + offsetXVal,
+                y = pos.y + offsetYVal,
+                z = pos.z + offsetZVal
+            }
+            local rotation = getRotation(selfPos, pos)
+            if noise:get_value():get() then
+                local rng = math.random
+                if isSelected(randomMode, 1) then
+                    rng = function()
+                        return secureRandom:random()
+                    end
+                elseif isSelected(randomMode, 2) then
+                    rng = function ()
+                        return limit(gaussianRandom(), 0, 1)
+                    end
+                elseif isSelected(randomMode, 3) then
+                    rng = function()
+                        return intaveRandom:random()
+                    end
+                end
+
+                rotation.yaw = rotation.yaw + rng() * noiseScale:get_value():get()
+                rotation.pitch = rotation.pitch + rng() * noiseScale:get_value():get()
+            end
+            rotation.pitch = limit(rotation.pitch, -89, 89)
+
+            local deltaYaw = getYawDiff(angles.y, rotation.yaw)
+            local deltaPitch = rotation.pitch - angles.x
+            local newRotation = {
+                yaw = angles.y + deltaYaw,
+                pitch = rotation.pitch
+            }
+
+            local newDelta = math.sqrt(deltaYaw * deltaYaw + deltaPitch * deltaPitch)
+            if newDelta > delta then
+                return
+            end
+
+            delta = newDelta
+            target = newRotation
+        end)
+
+        if target == nil then
+            return
+        end
+
+        angles.x = target.pitch
+        angles.y = target.yaw
+        cmd:set_viewangles(angles)
+        if lockView:get_value():get() then
+            cmd:lock_angles()
+        end
+    end)
+end)
+
+
+call(function ()
+    local MOD_NAME = "Backtrack"
+    local enabled = newCheckbox(GROUP_A, MOD_NAME)
+    addLabel(GROUP_B, MOD_NAME)
+    local maxDelay = newSlider(GROUP_B, "Max Delay", 200, 0, 250, 5, "%.0fms")
+    local onlyWhilePeek = newCheckbox(GROUP_B, "Only While Peek", false)
+    local lastState = false
+
+    local function updateState()
+        if enabled:get_value():get() and ((not onlyWhilePeek:get_value():get()) or PEEKASSIST:get_value():get()) then
+            if lastState then
+                return
+            end
+            Backend_send("enable " .. MOD_NAME)
+            lastState = true
+        else
+            if not lastState then
+                return
+            end
+            Backend_send("disable " .. MOD_NAME)
+            lastState = false
+        end
+    end
+
+    enabled.inactive = not Backend_connected
+    enabled:add_callback(updateState)
+    maxDelay:add_callback(function ()
+        Backend_send(MOD_NAME .. " " .. maxDelay:get_value():get())
+    end)
+    events.create_move:add(updateState)
+end)
+
+call(function ()
+    local MOD_NAME = "FakeLag"
+    local enabled = newCheckbox(GROUP_A, MOD_NAME)
+    addLabel(GROUP_B, MOD_NAME)
+    local maxDelay = newSlider(GROUP_B, "Max Delay", 200, 0, 250, 5, "%.0fms")
+    local releaseOnShot = newCheckbox(GROUP_B, "Release On Shot", false)
+    local lastState = false
+
+    local function updateState()
+        if enabled:get_value():get() then
+            if lastState then
+                return
+            end
+            Backend_send("enable " .. MOD_NAME)
+            lastState = true
+        else
+            if not lastState then
+                return
+            end
+            Backend_send("disable " .. MOD_NAME)
+            lastState = false
+        end
+    end
+
+    enabled.inactive = not Backend_connected
+    enabled:add_callback(updateState)
+    maxDelay:add_callback(function ()
+        Backend_send(MOD_NAME .. " " .. maxDelay:get_value():get())
+    end)
+    events.event:add(function(event)
+        if not enabled:get_value():get() then
+            return
+        end
+        if not releaseOnShot:get_value():get() then
+            return
+        end
+        if event:get_name() ~= "weapon_fire" then
+            return
+        end
+
+        local controller = event:get_controller("userid")
+        if controller == nil then
+            return
+        end
+        local self = entities.get_local_controller()
+        if self == nil or self ~= controller then
+            return
+        end
+
+        Backend_send("disable " .. MOD_NAME)
+        updateState()
+    end)
+end)
+
+newButton(GROUP_A, "Safe-Unload", "Unload"):add_callback(function ()
+    Backend_close()
+    error("Lira Unloaded!")
 end)
 
 

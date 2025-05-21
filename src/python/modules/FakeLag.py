@@ -3,14 +3,15 @@ from collections import deque
 
 from pydivert import Packet, WinDivert
 
+from shared.Logger import LOGGER
 from .Module import Module
 from utils import SystemUtils
 
 
 class FakeLag(Module):
-    def __init__(self, divert: WinDivert, key: str, fakeLagMs: int = 100):
+    def __init__(self, divert: WinDivert, key: str | None, fakeLagMs: int = 100):
         super().__init__(divert, key)
-        self._fakeLagMs: int = fakeLagMs
+        self.fakeLagMs: int = fakeLagMs
         self._delayedPackets: deque[tuple[int, Packet]] = deque()
 
     @staticmethod
@@ -23,25 +24,24 @@ class FakeLag(Module):
             return False
         return SystemUtils.getProcessNameByPID(pid) == "cs2.exe"
 
-    def onEnabled(self) -> None:
-        print(f"Start fakeLag ({self._fakeLagMs}ms).")
-
     def onDisabled(self) -> None:
-        print(f"Released {len(self._delayedPackets)} packets.")
+        LOGGER.debug(f"FakeLag: Released {len(self._delayedPackets)} packets.")
         for data in self._delayedPackets:
             self.sendPacket(data[1])
         self._delayedPackets.clear()
 
-    def onUpdate(self, packet: Packet) -> None:
+    def onUpdate(self, packet: Packet) -> bool:
         curTime = int(time.time() * 1000)
         delayed: deque = self._delayedPackets
         delayed.append((curTime, packet))
 
         if len(delayed) > 0:
-            packetTime, packet = delayed[0]
+            while len(delayed) > 0:
+                packetTime, packet = delayed[0]
 
-            if curTime - packetTime < self._fakeLagMs:
-                return
+                if curTime - packetTime < self.fakeLagMs:
+                    return False
 
-            self.onDisabled()
-            return
+                delayed.popleft()
+                self.sendPacket(packet)
+        return False
